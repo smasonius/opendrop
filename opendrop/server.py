@@ -31,6 +31,9 @@ import libarchive.read
 from zeroconf import IPVersion, ServiceInfo, Zeroconf
 
 from .util import AirDropUtil
+from .config import AirDropConfig
+
+from opendrop.decoder import dvzip_decompress, cpio_decode
 
 logger = logging.getLogger(__name__)
 
@@ -163,8 +166,9 @@ class AirDropServerHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def handle_discover(self):
-        content_length = int(self.headers["Content-Length"])
-        post_data = self.rfile.read(content_length)
+        #content_length = 0#int(self.headers["Content-Length"])
+        
+        post_data = self.read_chunked()
 
         AirDropUtil.write_debug(
             self.config, post_data, "receive_discover_request.plist"
@@ -222,8 +226,8 @@ class AirDropServerHandler(BaseHTTPRequestHandler):
         self.wfile.write(discover_answer_binary)
 
     def handle_ask(self):
-        content_length = int(self.headers["Content-Length"])
-        post_data = self.rfile.read(content_length)
+        #content_length = int(self.headers["Content-Length"])
+        post_data = self.read_chunked()
 
         AirDropUtil.write_debug(self.config, post_data, "receive_ask_request.plist")
 
@@ -243,13 +247,13 @@ class AirDropServerHandler(BaseHTTPRequestHandler):
         self.wfile.write(ask_resp_binary)
 
     def handle_upload(self):
-        if self.headers.get("content-type", "").lower() != "application/x-cpio":
+        if self.headers.get("content-type", "").lower() != "application/x-dvzip":
             logger.warning(
                 f"Unsupported content-type: {self.headers.get('content-type')}"
             )
             self.send_response(406)  # Unprocessable Entity
             self.send_header("Content-Type", "application/x-cpio")
-            self.send_header("Content-Length", 0)
+            self.send_header("Content-Length", str(0))
             self.send_header("Connection", "close")
             self.end_headers()
             return
@@ -257,23 +261,34 @@ class AirDropServerHandler(BaseHTTPRequestHandler):
         # If pipelining is not support, 'Expect: 100-continue' is sent to which we need to respond
         if self.headers.get("expect", "").lower() == "100-continue":
             self.send_response(100)
-            self.send_header("Content-Length", 0)
+            self.send_header("Content-Length", str(0))
             self.end_headers()
 
         if self.headers.get("transfer-encoding", "").lower() != "chunked":
             logger.warning("Expect chunked transfer encoding")
             self.send_response(400)  # Bad Request
             self.send_header("Transfer-Encoding", "Chunked")
-            self.send_header("Content-Length", 0)
+            self.send_header("Content-Length", str(0))
             self.send_header("Connection", "close")
             self.end_headers()
             return
-
+        total_bytes = self.headers.get("TotalBytes")
+        if total_bytes == None:
+            logger.warning(
+                f"No content length given"
+            )
+            self.send_response(406)  # Unprocessable Entity
+            self.send_header("Content-Type", "application/x-cpio")
+            self.send_header("Content-Length", str(0))
+            self.send_header("Connection", "close")
+            self.end_headers()
+            return
+        
         class HTTPChunkedReader(io.RawIOBase):
             def __init__(self, rfile, *args, **kwargs):
                 super().__init__(*args, **kwargs)
                 self.rfile = rfile
-                self.chunk = None
+                self.chunk: bytes = bytes()
                 self.total = 0
 
             def _next_chunk(self):
@@ -284,11 +299,16 @@ class AirDropServerHandler(BaseHTTPRequestHandler):
 
             def readinto(self, buf):
                 self._next_chunk()
-                length = min(len(self.chunk), len(buf))
-                buf[:length] = self.chunk[:length]
-                self.chunk = self.chunk[length:]
-                self.total += length
-                return length
+
+                while len(self.chunk) != 0:
+                    length = min(len(self.chunk), len(buf)-self.total)
+                    buf[self.total:self.total+length] = self.chunk[:length]
+                    self.chunk = self.chunk[length:]
+                    self.total += length
+                    print(f"Chunk length: {length}, Remaining Buffer: {len(buf)-self.total}")
+                    self._next_chunk()
+
+                return self.total
 
         def extract_stream(stream, flags=0):
             """
@@ -301,8 +321,20 @@ class AirDropServerHandler(BaseHTTPRequestHandler):
         logger.info("Receiving file(s) ...")
         start = time.time()
         reader = HTTPChunkedReader(self.rfile)
-        extract_stream(reader)
+        #extract_stream(reader)
+        buffer = bytearray(int(total_bytes))
+        reader.readinto(buffer)
+        decompressed = dvzip_decompress(bytes(buffer))
+        cpio_list = cpio_decode(decompressed)
+        for entry in cpio_list:
+            print(f"cpio entry: name={entry.name}, length={entry.size}")
 
+            if  entry.name == ".":
+                continue
+            with open(AirDropConfig().airdrop_dir+"/received/"+entry.name, "wb") as binary_file:
+                print(f"Data length: {len(entry.data)}")
+                bytes_written = binary_file.write(entry.data)
+                print(f"Bytes written: {bytes_written}")
         transferred = reader.total / 1024.0 / 1024.0
         speed = transferred / (time.time() - start)
         logger.info(
@@ -310,7 +342,7 @@ class AirDropServerHandler(BaseHTTPRequestHandler):
         )
 
         self.send_response(200)
-        self.send_header("Content-Length", 0)
+        self.send_header("Content-Length", str(0))
         self.send_header("Connection", "close")
         self.end_headers()
 
@@ -331,7 +363,7 @@ class AirDropServerHandler(BaseHTTPRequestHandler):
         else:
             logger.debug(f"POST request at {self.path}")
             self.send_response(400)
-            self.send_header("Content-Length", 0)
+            self.send_header("Content-Length", str(0))
             self.end_headers()
 
     def log_message(self, format, *args):
@@ -339,3 +371,35 @@ class AirDropServerHandler(BaseHTTPRequestHandler):
         logger.debug(
             f"{self.client_address[0]} - - [{self.log_date_time_string()}] {format % args}"
         )
+
+    def read_chunked(self):
+        body = bytearray()
+        rfile = self.rfile
+        while True:
+            # Chunk size line, e.g. b"1a\r\n"
+            line = rfile.readline()
+            if not line:
+                raise ConnectionError("Unexpected EOF")
+
+            size = int(line.split(b";", 1)[0], 16)
+
+            if size == 0:
+                # Consume trailing headers until the empty line.
+                while True:
+                    line = rfile.readline()
+                    if line in (b"\r\n", b"\n", b""):
+                        break
+                break
+
+            chunk = rfile.read(size)
+            if len(chunk) != size:
+                raise ConnectionError("Unexpected EOF in chunk")
+
+            body.extend(chunk)
+
+            # Consume the chunk's trailing CRLF.
+            crlf = rfile.read(2)
+            if crlf != b"\r\n":
+                raise ValueError("Invalid chunk terminator")
+
+        return bytes(body)
