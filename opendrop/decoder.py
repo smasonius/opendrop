@@ -1,117 +1,57 @@
+# This file was originally taken from:
+# 
 # ============================================================================
 # Paper:   Protocol Prying: Systematic Vulnerability Research in the Apple
 #          AirDrop and Android Quick Share Proximity Transfer Protocols
 # Venue:   WOOT'26 (20th USENIX WOOT Conference on Offensive Technologies)
 # Authors: Arash Ale Ebrahim, Nils Ole Tippenhauer
 # ============================================================================
+#
+# Unused functions were removed and support for uncompressed chunks in the decompressor was added.
 """
 AirDrop protocol decoder — parse responses and payloads.
 
-Used for:
-  - Parsing HTTP responses from sharingd
-  - Extracting plist response bodies
-  - Classifying response outcomes (normal, error, crash, hang)
-  - Decoding CPIO/DVZip for analysis
+Used for decoding CPIO/DVZip for analysis
 """
 
 from __future__ import annotations
 
-import plistlib
 import struct
 import zlib
 from dataclasses import dataclass
-from enum import Enum
-from typing import Optional
 
+# ─── Chunked reader ────────────────────────────────────────────
 
-class Outcome(Enum):
-    """Classification of a fuzz execution result."""
-    NORMAL = "normal"           # Expected response (200, 401, 406, etc.)
-    SERVER_ERROR = "server_error"  # 5xx response
-    CRASH = "crash"             # Confirmed process crash (PID changed)
-    HANG = "hang"               # Timeout waiting for response
-    CONN_RESET = "conn_reset"   # Connection reset by peer
-    CONN_REFUSED = "conn_refused"  # Cannot connect (not necessarily a crash)
-    PARSE_ERROR = "parse_error"    # Unparseable response
-    ERROR = "error"             # Transient error (Frida disconnect, etc.)
-    UNEXPECTED = "unexpected"      # Something weird
+def read_chunked(rfile):
+    body = bytearray()
+    while True:
+        # Chunk size line, e.g. b"1a\r\n"
+        line = rfile.readline()
+        if not line:
+            raise ConnectionError("Unexpected EOF")
 
+        size = int(line.split(b";", 1)[0], 16)
 
-@dataclass
-class FuzzResponse:
-    """Parsed response from target."""
-    outcome: Outcome
-    status: int = 0
-    headers: dict = None
-    body: bytes = b""
-    plist: Optional[dict] = None
-    elapsed_ms: float = 0.0
-    error_msg: str = ""
+        if size == 0:
+            # Consume trailing headers until the empty line.
+            while True:
+                line = rfile.readline()
+                if line in (b"\r\n", b"\n", b""):
+                    break
+            break
 
-    def __post_init__(self):
-        if self.headers is None:
-            self.headers = {}
-        # Try to parse body as plist
-        if self.body and self.plist is None:
-            try:
-                self.plist = plistlib.loads(self.body)
-            except Exception:
-                pass
+        chunk = rfile.read(size)
+        if len(chunk) != size:
+            raise ConnectionError("Unexpected EOF in chunk")
 
-    @property
-    def is_crash(self) -> bool:
-        return self.outcome == Outcome.CRASH
+        body.extend(chunk)
 
-    @property
-    def is_hang(self) -> bool:
-        return self.outcome == Outcome.HANG
+        # Consume the chunk's trailing CRLF.
+        crlf = rfile.read(2)
+        if crlf != b"\r\n":
+            raise ValueError("Invalid chunk terminator")
 
-    @property
-    def is_error(self) -> bool:
-        return self.outcome == Outcome.SERVER_ERROR or self.status >= 500
-
-    @property
-    def is_interesting(self) -> bool:
-        """True if this response suggests a bug worth investigating."""
-        if self.is_crash or self.is_hang:
-            return True
-        if self.is_error:
-            return True
-        if self.outcome == Outcome.UNEXPECTED:
-            return True
-        return False
-
-
-def parse_http_response(data: bytes) -> tuple[int, dict, bytes]:
-    """
-    Parse raw HTTP response bytes.
-    Returns (status, headers_dict, body).
-    """
-    if b"\r\n\r\n" not in data:
-        raise ValueError("Incomplete HTTP response — no header terminator")
-
-    hdr_end = data.index(b"\r\n\r\n") + 4
-    header_section = data[:hdr_end].decode("iso-8859-1")
-    body = data[hdr_end:]
-
-    lines = header_section.split("\r\n")
-    status_line = lines[0]
-
-    # Parse status
-    parts = status_line.split(" ", 2)
-    if len(parts) < 2:
-        raise ValueError(f"Malformed status line: {status_line!r}")
-    status = int(parts[1])
-
-    # Parse headers
-    headers = {}
-    for line in lines[1:]:
-        if ":" in line:
-            k, v = line.split(":", 1)
-            headers[k.strip().lower()] = v.strip()
-
-    return status, headers, body
-
+    return bytes(body)
 
 # ─── DVZip Decoder ────────────────────────────────────────────
 

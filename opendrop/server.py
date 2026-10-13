@@ -33,7 +33,7 @@ from zeroconf import IPVersion, ServiceInfo, Zeroconf
 from .util import AirDropUtil
 from .config import AirDropConfig
 
-from opendrop.decoder import dvzip_decompress, cpio_decode
+from opendrop.decoder import dvzip_decompress, cpio_decode, read_chunked
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +43,7 @@ class AirDropServer:
     Announces an HTTPS AirDrop server in the local network via mDNS.
     """
 
-    def __init__(self, config):
+    def __init__(self, config: AirDropConfig):
         self.config = config
 
         # Use IPv6
@@ -86,7 +86,7 @@ class AirDropServer:
             port=self.config.port,
             properties=properties,
             server=server,
-            addresses=[self.ip_addr.packed],
+            addresses=[self.ip_addr.packed] if self.ip_addr != None else None,
         )
         return info
 
@@ -138,7 +138,7 @@ class AirDropServerHandler(BaseHTTPRequestHandler):
     """
 
     protocol_version = "HTTP/1.1"
-    config = None
+    config: AirDropConfig
 
     def _set_response(self, content_length):
         """
@@ -168,7 +168,7 @@ class AirDropServerHandler(BaseHTTPRequestHandler):
     def handle_discover(self):
         #content_length = 0#int(self.headers["Content-Length"])
         
-        post_data = self.read_chunked()
+        post_data = read_chunked(self.rfile)
 
         AirDropUtil.write_debug(
             self.config, post_data, "receive_discover_request.plist"
@@ -227,7 +227,7 @@ class AirDropServerHandler(BaseHTTPRequestHandler):
 
     def handle_ask(self):
         #content_length = int(self.headers["Content-Length"])
-        post_data = self.read_chunked()
+        post_data = read_chunked(self.rfile)
 
         AirDropUtil.write_debug(self.config, post_data, "receive_ask_request.plist")
 
@@ -247,7 +247,8 @@ class AirDropServerHandler(BaseHTTPRequestHandler):
         self.wfile.write(ask_resp_binary)
 
     def handle_upload(self):
-        if self.headers.get("content-type", "").lower() != "application/x-dvzip":
+        content_type = self.headers.get("content-type", "").lower()
+        if  content_type != "application/x-dvzip":
             logger.warning(
                 f"Unsupported content-type: {self.headers.get('content-type')}"
             )
@@ -320,11 +321,12 @@ class AirDropServerHandler(BaseHTTPRequestHandler):
 
         logger.info("Receiving file(s) ...")
         start = time.time()
-        reader = HTTPChunkedReader(self.rfile)
+        #reader = HTTPChunkedReader(self.rfile)
         #extract_stream(reader)
-        buffer = bytearray(int(total_bytes))
-        reader.readinto(buffer)
-        decompressed = dvzip_decompress(bytes(buffer))
+        #buffer = bytearray(int(total_bytes))
+        #reader.readinto(buffer)
+        http_body = read_chunked(self.rfile)
+        decompressed = dvzip_decompress(http_body)
         cpio_list = cpio_decode(decompressed)
         for entry in cpio_list:
             print(f"cpio entry: name={entry.name}, length={entry.size}")
@@ -335,7 +337,7 @@ class AirDropServerHandler(BaseHTTPRequestHandler):
                 print(f"Data length: {len(entry.data)}")
                 bytes_written = binary_file.write(entry.data)
                 print(f"Bytes written: {bytes_written}")
-        transferred = reader.total / 1024.0 / 1024.0
+        transferred = len(http_body) / 1000.0 / 1000.0
         speed = transferred / (time.time() - start)
         logger.info(
             f"File(s) received (size {transferred:.02f} MB, speed {speed:.02f} MB/s)"
@@ -372,34 +374,4 @@ class AirDropServerHandler(BaseHTTPRequestHandler):
             f"{self.client_address[0]} - - [{self.log_date_time_string()}] {format % args}"
         )
 
-    def read_chunked(self):
-        body = bytearray()
-        rfile = self.rfile
-        while True:
-            # Chunk size line, e.g. b"1a\r\n"
-            line = rfile.readline()
-            if not line:
-                raise ConnectionError("Unexpected EOF")
 
-            size = int(line.split(b";", 1)[0], 16)
-
-            if size == 0:
-                # Consume trailing headers until the empty line.
-                while True:
-                    line = rfile.readline()
-                    if line in (b"\r\n", b"\n", b""):
-                        break
-                break
-
-            chunk = rfile.read(size)
-            if len(chunk) != size:
-                raise ConnectionError("Unexpected EOF in chunk")
-
-            body.extend(chunk)
-
-            # Consume the chunk's trailing CRLF.
-            crlf = rfile.read(2)
-            if crlf != b"\r\n":
-                raise ValueError("Invalid chunk terminator")
-
-        return bytes(body)

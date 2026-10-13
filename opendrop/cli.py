@@ -126,7 +126,7 @@ class AirDropCli:
             pass
         finally:
             self.browser.stop()
-            logger.debug(f"Save discovery results to {self.config.discovery_report}")
+            logger.debug(f"Save discovery results {self.discover} to {self.config.discovery_report}")
             with open(self.config.discovery_report, "w") as f:
                 json.dump(self.discover, f)
 
@@ -143,7 +143,7 @@ class AirDropCli:
         identifier = info.name.split(".")[0]
         hostname = info.server
         port = int(info.port)
-        logger.debug(f"AirDrop service found: {hostname}, {address}:{port}, ID {id}")
+        logger.debug(f"AirDrop service found: {hostname}, {address}:{port}, ID {identifier}")
         client = AirDropClient(self.config, (address, int(port)))
         try:
             flags = int(info.properties[b"flags"])
@@ -219,7 +219,7 @@ class AirDropCli:
         except IndexError:
             pass
         # (2) try 'id'
-        if len(self.receiver) == 12:
+        if type(self.receiver)!= int and (self.receiver) == 12:
             for info in infos:
                 if info["id"] == self.receiver:
                     return info
