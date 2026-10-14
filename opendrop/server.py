@@ -28,14 +28,10 @@ import zlib
 from enum import Enum
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-import libarchive
-import libarchive.extract
-import libarchive.read
 from zeroconf import IPVersion, ServiceInfo, Zeroconf
 
-from opendrop.decoder import cpio_decode, dvzip_decompress, read_chunked
-
 from .config import AirDropConfig
+from .decoder import cpio_decode, dvzip_decompress, read_chunked
 from .util import AirDropUtil
 
 logger = logging.getLogger(__name__)
@@ -164,7 +160,7 @@ class AirDropServerHandler(BaseHTTPRequestHandler):
         Answer get requests
         """
         logger.debug(f"GET request at {self.path}")
-        body = "\n".encode("utf-8")
+        body = b"\n"
         self._set_response(len(body))
         self.wfile.write(body)
 

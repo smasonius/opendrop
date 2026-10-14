@@ -98,14 +98,14 @@ class AirDropUtil:
 
         # rotate according to EXIF tags
         try:
-            exif = dict(
-                (ExifTags.TAGS[k], v)
+            exif = {
+                ExifTags.TAGS[k]: v
                 for k, v in im._getexif().items()  # pylint: disable=protected-access
                 if k in ExifTags.TAGS
-            )
+            }
             angles = {3: 180, 6: 270, 8: 90}
             orientation = exif["Orientation"]
-            if orientation in angles.keys():
+            if orientation in angles:
                 im = im.rotate(angles[orientation], expand=True)
         except (AttributeError, KeyError):
             pass  # no EXIF data available
@@ -181,7 +181,7 @@ class AbsArchiveWrite(ArchiveWrite):
             block_size = 10240  # pragma: no cover
 
         with new_archive_entry() as entry_p:
-            entry = ArchiveEntry( entry_p,'utf-8')
+            entry = ArchiveEntry(entry_p, "utf-8")
             with new_archive_read_disk(path) as read_p:
                 while True:
                     r = read_next_header2(read_p, entry_p)
@@ -197,7 +197,7 @@ class AbsArchiveWrite(ArchiveWrite):
                                 if not data:
                                     break
                                 write_data(write_p, data, len(data))
-                    except IOError as e:
+                    except OSError as e:
                         if e.errno != 21:
                             raise  # pragma: no cover
                     write_finish_entry(write_p)

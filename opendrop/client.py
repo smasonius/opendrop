@@ -80,7 +80,7 @@ class AirDropBrowser:
         if self.callback_add is not None:
             self.callback_add(info)
 
-    def update_service():
+    def update_service(self):
         logger.debug("Requested service update")
 
     def remove_service(self, zeroconf, service_type, name):
@@ -247,6 +247,8 @@ class HTTPSConnectionAWDL(HTTPSConnection):
     This class allows to bind the HTTPConnection to a specific network interface
     """
 
+    TIMEOUT = socket.getdefaulttimeout()
+
     def __init__(
         self,
         host,
@@ -261,15 +263,17 @@ class HTTPSConnectionAWDL(HTTPSConnection):
         interface_name=None,
     ):
 
-        if interface_name is not None:
-            if "%" not in host:
-                if isinstance(ipaddress.ip_address(host), ipaddress.IPv6Address):
-                    host = host + "%" + interface_name
+        if (
+            interface_name is not None
+            and "%" not in host
+            and isinstance(ipaddress.ip_address(host), ipaddress.IPv6Address)
+        ):
+            host = host + "%" + interface_name
 
         if timeout is None:
-            timeout = socket.getdefaulttimeout()
+            timeout = self.TIMEOUT
 
-        super(HTTPSConnectionAWDL, self).__init__(
+        super().__init__(
             host=host,
             port=port,
             key_file=key_file,
@@ -283,9 +287,7 @@ class HTTPSConnectionAWDL(HTTPSConnection):
         self.interface_name = interface_name
         self._create_connection = self.create_connection_awdl
 
-    def create_connection_awdl(
-        self, address, timeout=socket.getdefaulttimeout(), source_address=None
-    ):
+    def create_connection_awdl(self, address, timeout=TIMEOUT, source_address=None):
         """Connect to *address* and return the socket object.
 
         Convenience function.  Connect to *address* (a 2-tuple ``(host,
@@ -315,7 +317,7 @@ class HTTPSConnectionAWDL(HTTPSConnection):
                 # Break explicitly a reference cycle
                 return sock
 
-            except socket.error as _:
+            except OSError as _:
                 err = _
                 if sock is not None:
                     sock.close()
@@ -323,4 +325,4 @@ class HTTPSConnectionAWDL(HTTPSConnection):
         if err is not None:
             raise err
         else:
-            raise socket.error("getaddrinfo returns an empty list")
+            raise OSError("getaddrinfo returns an empty list")
