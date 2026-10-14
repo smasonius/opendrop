@@ -16,13 +16,16 @@ GNU General Public License for more details.
 You should have received a copy of the GNU General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
-import io
+
 import json
 import logging
+import os
 import platform
 import plistlib
 import socket
 import time
+import zlib
+from enum import Enum
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import libarchive
@@ -30,10 +33,10 @@ import libarchive.extract
 import libarchive.read
 from zeroconf import IPVersion, ServiceInfo, Zeroconf
 
-from .util import AirDropUtil
-from .config import AirDropConfig
+from opendrop.decoder import cpio_decode, dvzip_decompress, read_chunked
 
-from opendrop.decoder import dvzip_decompress, cpio_decode, read_chunked
+from .config import AirDropConfig
+from .util import AirDropUtil
 
 logger = logging.getLogger(__name__)
 
@@ -166,9 +169,11 @@ class AirDropServerHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def handle_discover(self):
-        #content_length = 0#int(self.headers["Content-Length"])
-        
-        post_data = read_chunked(self.rfile)
+        if "Content-Length" in self.headers:
+            content_length = int(self.headers["Content-Length"])
+            post_data = self.rfile.read(content_length)
+        else:
+            post_data = read_chunked(self.rfile)
 
         AirDropUtil.write_debug(
             self.config, post_data, "receive_discover_request.plist"
@@ -214,7 +219,8 @@ class AirDropServerHandler(BaseHTTPRequestHandler):
             discover_answer["ReceiverRecordData"] = self.config.record_data
 
         discover_answer_binary = plistlib.dumps(
-            discover_answer, fmt=plistlib.FMT_BINARY  # pylint: disable=no-member
+            discover_answer,
+            fmt=plistlib.FMT_BINARY,  # pylint: disable=no-member
         )
 
         AirDropUtil.write_debug(
@@ -226,8 +232,11 @@ class AirDropServerHandler(BaseHTTPRequestHandler):
         self.wfile.write(discover_answer_binary)
 
     def handle_ask(self):
-        #content_length = int(self.headers["Content-Length"])
-        post_data = read_chunked(self.rfile)
+        if "Content-Length" in self.headers:
+            content_length = int(self.headers["Content-Length"])
+            post_data = self.rfile.read(content_length)
+        else:
+            post_data = read_chunked(self.rfile)
 
         AirDropUtil.write_debug(self.config, post_data, "receive_ask_request.plist")
 
@@ -236,7 +245,8 @@ class AirDropServerHandler(BaseHTTPRequestHandler):
             "ReceiverComputerName": self.config.computer_name,
         }
         ask_resp_binary = plistlib.dumps(
-            ask_response, fmt=plistlib.FMT_BINARY  # pylint: disable=no-member
+            ask_response,
+            fmt=plistlib.FMT_BINARY,  # pylint: disable=no-member
         )
 
         AirDropUtil.write_debug(
@@ -247,8 +257,24 @@ class AirDropServerHandler(BaseHTTPRequestHandler):
         self.wfile.write(ask_resp_binary)
 
     def handle_upload(self):
-        content_type = self.headers.get("content-type", "").lower()
-        if  content_type != "application/x-dvzip":
+        class ContentType(Enum):
+            UNSUPPORTED = 0
+            CPIO = 1  # "application/x-cpio"
+            DVZIP = 2  # "application/x-dvzip"
+
+            @staticmethod
+            def from_str(label):
+                if label == "application/x-cpio":
+                    return ContentType.CPIO
+                elif label == "application/x-dvzip":
+                    return ContentType.DVZIP
+                else:
+                    return ContentType.UNSUPPORTED
+
+        content_type = ContentType.from_str(
+            self.headers.get("content-type", "").lower()
+        )
+        if content_type == ContentType.UNSUPPORTED:
             logger.warning(
                 f"Unsupported content-type: {self.headers.get('content-type')}"
             )
@@ -273,67 +299,42 @@ class AirDropServerHandler(BaseHTTPRequestHandler):
             self.send_header("Connection", "close")
             self.end_headers()
             return
-        total_bytes = self.headers.get("TotalBytes")
-        if total_bytes == None:
-            logger.warning(
-                f"No content length given"
-            )
+
+        if (
+            not "ContentLength" in self.headers
+            and not "Transfer-Encoding" in self.headers
+        ):
+            logger.warning("No content length for unchunked encoding given")
             self.send_response(406)  # Unprocessable Entity
             self.send_header("Content-Type", "application/x-cpio")
             self.send_header("Content-Length", str(0))
             self.send_header("Connection", "close")
             self.end_headers()
             return
-        
-        class HTTPChunkedReader(io.RawIOBase):
-            def __init__(self, rfile, *args, **kwargs):
-                super().__init__(*args, **kwargs)
-                self.rfile = rfile
-                self.chunk: bytes = bytes()
-                self.total = 0
-
-            def _next_chunk(self):
-                if self.chunk is None or len(self.chunk) == 0:
-                    length = int(self.rfile.readline().rstrip(), 16)
-                    self.chunk = self.rfile.read(length)
-                    self.rfile.readline()  # strip trailing \n\r
-
-            def readinto(self, buf):
-                self._next_chunk()
-
-                while len(self.chunk) != 0:
-                    length = min(len(self.chunk), len(buf)-self.total)
-                    buf[self.total:self.total+length] = self.chunk[:length]
-                    self.chunk = self.chunk[length:]
-                    self.total += length
-                    print(f"Chunk length: {length}, Remaining Buffer: {len(buf)-self.total}")
-                    self._next_chunk()
-
-                return self.total
-
-        def extract_stream(stream, flags=0):
-            """
-            Extracts an archive from memory into the current directory.
-            """
-
-            with libarchive.read.stream_reader(stream) as archive:
-                libarchive.extract.extract_entries(archive, flags)
 
         logger.info("Receiving file(s) ...")
         start = time.time()
-        #reader = HTTPChunkedReader(self.rfile)
-        #extract_stream(reader)
-        #buffer = bytearray(int(total_bytes))
-        #reader.readinto(buffer)
-        http_body = read_chunked(self.rfile)
-        decompressed = dvzip_decompress(http_body)
+
+        if "Content-Length" in self.headers:
+            content_length = int(self.headers["Content-Length"])
+            http_body = self.rfile.read(content_length)
+        else:
+            http_body = read_chunked(self.rfile)
+        if content_type == ContentType.CPIO:
+            decompressed = zlib.decompress(http_body, 15 + 32)
+        else:  # content_type == ContentType.DVZIP:
+            decompressed = dvzip_decompress(http_body)
+
         cpio_list = cpio_decode(decompressed)
         for entry in cpio_list:
             print(f"cpio entry: name={entry.name}, length={entry.size}")
 
-            if  entry.name == ".":
+            if entry.name == ".":
                 continue
-            with open(AirDropConfig().airdrop_dir+"/received/"+entry.name, "wb") as binary_file:
+
+            filename = os.path.join(self.config.received_dir, entry.name)
+            os.makedirs(os.path.dirname(filename), exist_ok=True)
+            with open(filename, "wb") as binary_file:
                 print(f"Data length: {len(entry.data)}")
                 bytes_written = binary_file.write(entry.data)
                 print(f"Bytes written: {bytes_written}")
@@ -373,5 +374,3 @@ class AirDropServerHandler(BaseHTTPRequestHandler):
         logger.debug(
             f"{self.client_address[0]} - - [{self.log_date_time_string()}] {format % args}"
         )
-
-

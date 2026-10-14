@@ -69,8 +69,9 @@ class AirDropBrowser:
         self.browser = ServiceBrowser(self.zeroconf, "_airdrop._tcp.local.", self)
 
     def stop(self):
-        self.browser.cancel()
-        self.browser = None
+        if self.browser != None:
+            self.browser.cancel()
+            self.browser = None
         self.zeroconf.close()
 
     def add_service(self, zeroconf, service_type, name):
@@ -78,6 +79,9 @@ class AirDropBrowser:
         logger.debug(f"Add service {name}")
         if self.callback_add is not None:
             self.callback_add(info)
+
+    def update_service():
+        logger.debug("Requested service update")
 
     def remove_service(self, zeroconf, service_type, name):
         info = zeroconf.get_service_info(service_type, name)
@@ -136,7 +140,8 @@ class AirDropClient:
             discover_body["SenderRecordData"] = self.config.record_data
 
         discover_plist_binary = plistlib.dumps(
-            discover_body, fmt=plistlib.FMT_BINARY  # pylint: disable=no-member
+            discover_body,
+            fmt=plistlib.FMT_BINARY,  # pylint: disable=no-member
         )
         _, response_bytes = self.send_POST("/Discover", discover_plist_binary)
         response = plistlib.loads(response_bytes)
@@ -183,7 +188,8 @@ class AirDropClient:
             ask_body["FileIcon"] = icon
 
         ask_binary = plistlib.dumps(
-            ask_body, fmt=plistlib.FMT_BINARY  # pylint: disable=no-member
+            ask_body,
+            fmt=plistlib.FMT_BINARY,  # pylint: disable=no-member
         )
         success, _ = self.send_POST("/Ask", ask_binary)
 

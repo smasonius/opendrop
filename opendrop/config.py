@@ -85,6 +85,8 @@ class AirDropConfig:
         self.debug = debug
         self.debug_dir = os.path.join(self.airdrop_dir, "debug")
 
+        self.received_dir = os.path.join(self.airdrop_dir, "received")
+
         if interface is None:
             interface = "awdl0"
         self.interface = interface
@@ -102,7 +104,7 @@ class AirDropConfig:
             | AirDropReceiverFlags.SUPPORTS_DISCOVER_MAYBE
         )
 
-        self.root_ca_file =  os.path.join(
+        self.root_ca_file = os.path.join(
             os.path.dirname(__file__), "certs/apple_root_ca.pem"
         )
         if not os.path.exists(self.root_ca_file):
@@ -149,8 +151,7 @@ class AirDropConfig:
                 f"/CN={self.computer_name}",
             ],
             cwd=self.key_dir,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             check=True,
         )
 
